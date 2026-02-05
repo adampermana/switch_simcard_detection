@@ -30,18 +30,27 @@ class _MyAppState extends State<MyApp> {
 
   final List<String> _logs = [];
   StreamSubscription<SIMSwitchEvent>? _eventSubscription;
+  Timer? _autoRefreshTimer;
 
   @override
   void initState() {
     super.initState();
     initPlatformState();
     _listenToEvents();
+    _startAutoRefresh();
   }
 
   @override
   void dispose() {
     _eventSubscription?.cancel();
+    _autoRefreshTimer?.cancel();
     super.dispose();
+  }
+
+  void _startAutoRefresh() {
+    _autoRefreshTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      _refreshAllSilent();
+    });
   }
 
   void _addLog(String message) {
@@ -64,7 +73,7 @@ class _MyAppState extends State<MyApp> {
       } else if (event.event == 'networkRestored') {
         _addLog('   Network restored on SIM ${(event.simIndex ?? 0) + 1}');
       }
-      _refreshAll();
+      _refreshAllSilent();
     });
   }
 
@@ -80,12 +89,64 @@ class _MyAppState extends State<MyApp> {
     }
   }
 
+  /// Silent refresh - no logs (for auto-refresh)
+  Future<void> _refreshAllSilent() async {
+    await _refreshCurrentSIMSilent();
+    await _refreshSIMStatusSilent();
+    await _refreshPermissionsSilent();
+    await _refreshNetworkInfoSilent();
+    await _checkRootedSilent();
+  }
+
   Future<void> _refreshAll() async {
     await _refreshCurrentSIM();
     await _refreshSIMStatus();
     await _refreshPermissions();
     await _refreshNetworkInfo();
     await _checkRooted();
+  }
+
+  Future<void> _refreshCurrentSIMSilent() async {
+    try {
+      final sim = await _plugin.getCurrentDataSIM();
+      setState(() => _currentSIM = sim);
+    } catch (_) {}
+  }
+
+  Future<void> _refreshSIMStatusSilent() async {
+    try {
+      final status = await _plugin.getSIMStatus();
+      setState(() => _simStatus = status);
+    } catch (_) {}
+  }
+
+  Future<void> _refreshPermissionsSilent() async {
+    try {
+      final perms = await _plugin.checkPermissions();
+      final canSwitch = await _plugin.canSwitchSIM();
+      setState(() {
+        _permissions = perms;
+        _canSwitch = canSwitch;
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _refreshNetworkInfoSilent() async {
+    try {
+      final quality = await _plugin.getNetworkQuality();
+      final info = await _plugin.getNetworkInfo();
+      setState(() {
+        _networkQuality = quality;
+        _networkInfo = info;
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _checkRootedSilent() async {
+    try {
+      final rooted = await _plugin.isDeviceRooted();
+      setState(() => _isRooted = rooted);
+    } catch (_) {}
   }
 
   Future<void> _refreshCurrentSIM() async {
