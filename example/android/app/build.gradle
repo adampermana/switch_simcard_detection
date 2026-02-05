@@ -65,3 +65,23 @@ flutter {
 }
 
 dependencies {}
+
+// Auto-grant WRITE_SECURE_SETTINGS after install
+// Usage: ./gradlew installDebug grantPermissions
+// Or just: ./gradlew grantPermissions (if already installed)
+task grantPermissions {
+    doLast {
+        def packageName = "com.switch_simcard_detection.adpstore.switch_simcard_detection_example"
+        exec {
+            commandLine 'adb', 'shell', 'pm', 'grant', packageName, 'android.permission.WRITE_SECURE_SETTINGS'
+        }
+        println "✓ WRITE_SECURE_SETTINGS permission granted to $packageName"
+    }
+}
+
+// Make grantPermissions run after installDebug
+tasks.whenTaskAdded { task ->
+    if (task.name == 'installDebug' || task.name == 'installRelease') {
+        task.finalizedBy grantPermissions
+    }
+}
