@@ -1,3 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
   package="com.switch_simcard_detection.adpstore.switch_simcard_detection">
+
+  <!-- Required permissions for SIM switching and network monitoring -->
+  <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+  <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+  <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
+  <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
 </manifest>
