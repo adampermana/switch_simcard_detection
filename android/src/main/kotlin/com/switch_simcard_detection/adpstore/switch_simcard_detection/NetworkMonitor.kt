@@ -30,23 +30,28 @@ class NetworkMonitor(
     companion object {
         private const val TAG = "NetworkMonitor"
         private const val CHECK_INTERVAL_MS = 5000L
-        private const val NETWORK_LOSS_THRESHOLD = 3
+        // Reduced: 2 consecutive failures = ~10s before triggering switch (was 3 = ~15s)
+        private const val NETWORK_LOSS_THRESHOLD = 2
         private const val PING_TIMEOUT_MS = 3000
         private const val PING_HOST = "google.com"
         private const val HTTP_CHECK_URL = "https://www.google.com/generate_204"
-        private const val SWITCH_COOLDOWN_MS = 10000L // Wait 10s between switches
+        // Cooldown between switches: 8s (was 10s). Prevents thrash while still allowing recovery.
+        private const val SWITCH_COOLDOWN_MS = 8000L
     }
-    
+
     private var isMonitoring = false
     private var primarySIM: Int = 0
     private var fallbackSIM: Int = 1
-    
+
     private val handler = Handler(Looper.getMainLooper())
     private val executor = Executors.newSingleThreadExecutor()
     private val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
     private val telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+    // simSwitcher is kept for READ-ONLY queries (getCurrentDataSIMSlot, isSIMActive, etc.)
+    // It is NOT used for switching — performSwitch() only calls onNetworkLost() so the
+    // plugin handles the switch. This prevents the previous double-switch bug.
     private val simSwitcher = SIMSwitcher(context)
-    
+
     private var networkLossCount = 0
     private var lastKnownGoodSIM = -1
     private var lastSwitchTime = 0L
@@ -128,40 +133,33 @@ class NetworkMonitor(
     }
     
     /**
-     * Actually perform the SIM switch
+     * Notify the plugin that the network has been lost and a switch is needed.
+     *
+     * IMPORTANT: This method no longer performs the SIM switch itself. It only:
+     * 1. Enforces a cooldown so we don't spam the callback
+     * 2. Calls onNetworkLost() so the plugin (SwitchSimcardDetectionPlugin) can switch
+     *
+     * This eliminates the double-switch bug where both NetworkMonitor AND the plugin
+     * callback were independently calling smartSwitch(), causing the SIM to switch
+     * and then immediately revert.
      */
     private fun performSwitch() {
-        // Check cooldown
         val now = System.currentTimeMillis()
         if (now - lastSwitchTime < SWITCH_COOLDOWN_MS) {
             Log.d(TAG, "Switch cooldown active, skipping")
             return
         }
-        
-        val currentSlot = simSwitcher.getCurrentDataSIMSlot()
-        val targetSlot = if (currentSlot == primarySIM) fallbackSIM else primarySIM
-        
-        Log.i(TAG, "=== AUTO SWITCH: SIM${currentSlot + 1} -> SIM${targetSlot + 1} ===")
-        
-        // Check if target SIM is active
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
-            if (!simSwitcher.isSIMActive(targetSlot)) {
-                Log.w(TAG, "Target SIM${targetSlot + 1} is not active, cannot switch")
-                return
-            }
-        }
-        
-        // Perform switch
-        val success = simSwitcher.smartSwitch(targetSlot)
-        
-        if (success) {
-            lastSwitchTime = now
-            networkLossCount = 0
-            Log.i(TAG, "✓ Auto-switch successful to SIM${targetSlot + 1}")
-            onNetworkLost(currentSlot) // Notify callback
-        } else {
-            Log.e(TAG, "✗ Auto-switch failed to SIM${targetSlot + 1}")
-        }
+
+        // Determine which SIM is currently active
+        // We pass the current primary slot as "lost" — the plugin decides the target
+        val lostSlot = primarySIM
+
+        Log.i(TAG, "=== NETWORK LOST on SIM${lostSlot + 1} — notifying plugin to switch ===")
+        lastSwitchTime = now
+        networkLossCount = 0
+
+        // Notify: the plugin will call smartSwitch() once
+        onNetworkLost(lostSlot)
     }
     
     private fun scheduleNextCheck() {

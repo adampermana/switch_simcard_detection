@@ -31,14 +31,15 @@ object PermissionHelper {
     fun getRequiredPermissions(): List<String> {
         val permissions = mutableListOf(
             Manifest.permission.READ_PHONE_STATE,
-            Manifest.permission.ACCESS_NETWORK_STATE
+            Manifest.permission.ACCESS_NETWORK_STATE,
+            Manifest.permission.CHANGE_NETWORK_STATE
         )
-        
+
         // Android 12+ requires READ_PHONE_NUMBERS for subscription info
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             permissions.add(Manifest.permission.READ_PHONE_NUMBERS)
         }
-        
+
         return permissions
     }
     
@@ -119,24 +120,29 @@ object PermissionHelper {
     fun getPermissionStatus(context: Context): Map<String, Boolean> {
         return mapOf(
             "READ_PHONE_STATE" to (ContextCompat.checkSelfPermission(
-                context, 
+                context,
                 Manifest.permission.READ_PHONE_STATE
             ) == PackageManager.PERMISSION_GRANTED),
-            
+
             "ACCESS_NETWORK_STATE" to (ContextCompat.checkSelfPermission(
-                context, 
+                context,
                 Manifest.permission.ACCESS_NETWORK_STATE
             ) == PackageManager.PERMISSION_GRANTED),
-            
+
+            "CHANGE_NETWORK_STATE" to (ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.CHANGE_NETWORK_STATE
+            ) == PackageManager.PERMISSION_GRANTED),
+
             "READ_PHONE_NUMBERS" to if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 ContextCompat.checkSelfPermission(
-                    context, 
+                    context,
                     Manifest.permission.READ_PHONE_NUMBERS
                 ) == PackageManager.PERMISSION_GRANTED
             } else {
                 true // Not required on older versions
             },
-            
+
             "WRITE_SECURE_SETTINGS" to hasWriteSettingsPermission(context)
         )
     }
