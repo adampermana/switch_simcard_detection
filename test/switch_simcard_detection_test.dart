@@ -46,7 +46,7 @@ class MockSwitchSimcardDetectionPlatform
   Future<bool> isDeviceRooted() => Future.value(false);
 
   @override
-  Stream<SIMSwitchEvent> get onSIMSwitched => Stream.empty();
+  Stream<SIMSwitchEvent> get onSIMSwitched => const Stream.empty();
 }
 
 void main() {
