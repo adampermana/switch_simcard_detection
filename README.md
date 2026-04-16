@@ -1,11 +1,11 @@
 # Switch SIM Card Detection Plugin
 
-A Flutter plugin for **automatic SIM card switching** on Android 12+ devices. Detects network loss and automatically switches to a fallback SIM card to maintain connectivity.
+A Flutter plugin for **automatic SIM card switching** on Android 12+ devices. It monitors the currently active data SIM and automatically switches to the other SIM when the active SIM can no longer access internet.
 
 ## Features
 
 ✅ **Manual SIM Switching** - Programmatically switch between SIM cards  
-✅ **Automatic Network Monitoring** - Detect network loss and auto-switch to fallback SIM  
+✅ **Automatic Network Monitoring** - Detect internet failure on the active SIM and auto-switch to the other SIM  
 ✅ **Network Quality Detection** - Monitor signal strength and connectivity  
 ✅ **Permission Management** - Helper methods for checking and requesting permissions  
 ✅ **Event Streaming** - Real-time events for SIM switches and network changes  
@@ -78,10 +78,10 @@ if (success) {
 
 ### Automatic Switching
 
-Enable automatic switching to fallback SIM when primary SIM loses network:
+Enable automatic switching between the two SIMs when the currently active data SIM loses usable internet:
 
 ```dart
-// Enable auto-switch (Primary: SIM1, Fallback: SIM2)
+// Enable auto-switch between SIM1 and SIM2
 await plugin.enableAutoSwitch(
   primarySIM: 0,
   fallbackSIM: 1,
@@ -101,7 +101,9 @@ plugin.onSIMSwitched.listen((event) {
     print('Switched to SIM ${(event.simIndex ?? 0) + 1}');
   } else if (event.event == 'autoSwitched') {
     print('Auto-switched from SIM ${(event.fromSIM ?? 0) + 1} to SIM ${(event.toSIM ?? 0) + 1}');
-    print('Reason: ${event.reason}');
+    if (event.reason == 'noInternet') {
+      print('Reason: Active SIM has no usable internet');
+    }
   } else if (event.event == 'networkRestored') {
     print('Network restored on SIM ${(event.simIndex ?? 0) + 1}');
   }
@@ -167,7 +169,7 @@ print('SIM Status: $status');
 | Event | Description | Properties |
 |-------|-------------|------------|
 | `simSwitched` | Manual SIM switch | `simIndex`, `timestamp` |
-| `autoSwitched` | Automatic SIM switch | `fromSIM`, `toSIM`, `reason`, `timestamp` |
+| `autoSwitched` | Automatic SIM switch after active-SIM internet failure | `fromSIM`, `toSIM`, `reason`, `timestamp` |
 | `networkRestored` | Network restored | `simIndex`, `timestamp` |
 
 ### Exceptions
@@ -229,9 +231,9 @@ adb shell settings get global multi_sim_data_call    # Verify
 ### Test Auto-Switching
 
 1. Enable auto-switch in example app
-2. Turn off SIM1 or move to area without SIM1 coverage
-3. Plugin should automatically switch to SIM2
-4. Check logs for auto-switch event
+2. Make the currently active data SIM unable to access internet
+3. Plugin should automatically switch to the other SIM after the configured threshold
+4. Check logs for an `autoSwitched` event with reason `noInternet`
 
 ## Device Compatibility
 
@@ -258,6 +260,7 @@ Tested on:
 ### Auto-Switch Not Working
 - Ensure runtime permissions are granted
 - Verify network monitoring is enabled
+- Check logcat for repeated `No usable internet` messages before the switch is expected
 - Check if device has proper network connectivity
 - Review event logs for network quality changes
 

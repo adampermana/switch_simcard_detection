@@ -8,7 +8,6 @@ import android.net.NetworkRequest
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.telephony.SubscriptionManager
 import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.annotation.RequiresApi
@@ -19,7 +18,7 @@ import java.net.URL
 import java.util.concurrent.Executors
 
 /**
- * NetworkMonitor - Monitor network quality dengan ping-based detection
+ * NetworkMonitor - Monitor network quality and usable internet for the active data SIM
  */
 class NetworkMonitor(
     private val context: Context,
@@ -37,6 +36,8 @@ class NetworkMonitor(
         private const val HTTP_CHECK_URL = "https://www.google.com/generate_204"
         // Cooldown between switches: 8s (was 10s). Prevents thrash while still allowing recovery.
         private const val SWITCH_COOLDOWN_MS = 8000L
+        // If both SIMs recently failed, pause before probing again to avoid switch ping-pong.
+        private const val BOTH_SIMS_RETRY_DELAY_MS = 20000L
     }
 
     private var isMonitoring = false
@@ -55,6 +56,9 @@ class NetworkMonitor(
     private var networkLossCount = 0
     private var lastKnownGoodSIM = -1
     private var lastSwitchTime = 0L
+    private var dualSimRetryBlockedUntil = 0L
+    private val recentFailureTimes = mutableMapOf<Int, Long>()
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
     
     /**
      * Start monitoring network
@@ -70,6 +74,9 @@ class NetworkMonitor(
         this.isMonitoring = true
         this.networkLossCount = 0
         this.lastSwitchTime = 0L
+        this.dualSimRetryBlockedUntil = 0L
+        this.recentFailureTimes.clear()
+        this.lastKnownGoodSIM = simSwitcher.getCurrentDataSIMSlot()
         
         Log.i(TAG, "Started monitoring - Primary: SIM${primarySIM + 1}, Fallback: SIM${fallbackSIM + 1}")
         
@@ -80,18 +87,21 @@ class NetworkMonitor(
     fun stopMonitoring() {
         isMonitoring = false
         handler.removeCallbacksAndMessages(null)
+        unregisterNetworkCallback()
         Log.i(TAG, "Stopped monitoring")
     }
     
     @RequiresPermission(android.Manifest.permission.ACCESS_NETWORK_STATE)
     private fun registerNetworkCallback() {
         try {
+            unregisterNetworkCallback()
+
             val networkRequest = NetworkRequest.Builder()
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
                 .build()
             
-            val callback = object : ConnectivityManager.NetworkCallback() {
+            networkCallback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
                     Log.d(TAG, "Network available: $network")
                     handleNetworkAvailable()
@@ -103,10 +113,22 @@ class NetworkMonitor(
                 }
             }
             
-            connectivityManager.registerNetworkCallback(networkRequest, callback)
+            connectivityManager.registerNetworkCallback(networkRequest, networkCallback!!)
             
         } catch (e: Exception) {
             Log.e(TAG, "Error registering network callback", e)
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        val callback = networkCallback ?: return
+
+        try {
+            connectivityManager.unregisterNetworkCallback(callback)
+        } catch (e: Exception) {
+            Log.d(TAG, "Network callback already unregistered: ${e.message}")
+        } finally {
+            networkCallback = null
         }
     }
     
@@ -114,6 +136,9 @@ class NetworkMonitor(
         networkLossCount = 0
         
         val currentSlot = simSwitcher.getCurrentDataSIMSlot()
+        recentFailureTimes.remove(currentSlot)
+        dualSimRetryBlockedUntil = 0L
+
         if (currentSlot != lastKnownGoodSIM && lastKnownGoodSIM != -1) {
             Log.i(TAG, "Network restored on SIM${currentSlot + 1}")
             onNetworkRestored(currentSlot)
@@ -125,7 +150,8 @@ class NetworkMonitor(
     private fun handleNetworkLost() {
         networkLossCount++
         
-        Log.w(TAG, "Network loss detected (count: $networkLossCount)")
+        val currentSlot = simSwitcher.getCurrentDataSIMSlot()
+        Log.w(TAG, "Network loss detected on SIM${currentSlot + 1} (count: $networkLossCount)")
         
         if (networkLossCount >= NETWORK_LOSS_THRESHOLD) {
             performSwitch()
@@ -150,11 +176,33 @@ class NetworkMonitor(
             return
         }
 
-        // Determine which SIM is currently active
-        // We pass the current primary slot as "lost" — the plugin decides the target
-        val lostSlot = primarySIM
+        if (now < dualSimRetryBlockedUntil) {
+            Log.w(TAG, "Both SIMs recently failed, waiting before retrying switch")
+            return
+        }
 
-        Log.i(TAG, "=== NETWORK LOST on SIM${lostSlot + 1} — notifying plugin to switch ===")
+        val lostSlot = simSwitcher.getCurrentDataSIMSlot()
+        val targetSlot = getOtherManagedSIM(lostSlot)
+
+        if (targetSlot == null) {
+            Log.w(TAG, "Could not determine target SIM for slot $lostSlot")
+            return
+        }
+
+        recentFailureTimes[lostSlot] = now
+
+        val targetFailedAt = recentFailureTimes[targetSlot]
+        if (targetFailedAt != null && now - targetFailedAt < BOTH_SIMS_RETRY_DELAY_MS) {
+            networkLossCount = 0
+            dualSimRetryBlockedUntil = now + BOTH_SIMS_RETRY_DELAY_MS
+            Log.w(
+                TAG,
+                "SIM${lostSlot + 1} and SIM${targetSlot + 1} both look offline. Holding switch attempts for ${BOTH_SIMS_RETRY_DELAY_MS / 1000}s"
+            )
+            return
+        }
+
+        Log.i(TAG, "=== NO INTERNET on SIM${lostSlot + 1} — notifying plugin to switch to SIM${targetSlot + 1} ===")
         lastSwitchTime = now
         networkLossCount = 0
 
@@ -172,7 +220,11 @@ class NetworkMonitor(
     }
     
     /**
-     * Perform network check with ping
+     * Perform network check.
+     *
+     * HTTP reachability is treated as the source of truth for usable internet.
+     * If the fetch fails or returns a non-200/204 response, the active SIM is
+     * considered offline and becomes eligible for auto-switching.
      */
     @RequiresPermission(android.Manifest.permission.ACCESS_NETWORK_STATE)
     private fun performNetworkCheck() {
@@ -189,13 +241,13 @@ class NetworkMonitor(
                         quality == NetworkQuality.NONE -> {
                             handleNetworkLost()
                         }
-                        !pingResult && !httpResult -> {
-                            Log.w(TAG, "Ping and HTTP check failed - no real internet")
+                        !httpResult -> {
+                            Log.w(TAG, "HTTP check failed - active SIM has no usable internet")
                             handleNetworkLost()
                         }
                         quality == NetworkQuality.POOR && !pingResult -> {
-                            Log.w(TAG, "Poor quality and ping failed")
-                            networkLossCount++
+                            Log.w(TAG, "Signal is poor, but HTTP still works - keeping current SIM")
+                            handleNetworkAvailable()
                         }
                         else -> {
                             handleNetworkAvailable()
@@ -245,6 +297,16 @@ class NetworkMonitor(
         } catch (e: Exception) {
             Log.d(TAG, "HTTP check failed: ${e.message}")
             false
+        }
+    }
+
+    private fun getOtherManagedSIM(currentSlot: Int): Int? {
+        return when (currentSlot) {
+            primarySIM -> fallbackSIM
+            fallbackSIM -> primarySIM
+            0 -> 1
+            1 -> 0
+            else -> null
         }
     }
     

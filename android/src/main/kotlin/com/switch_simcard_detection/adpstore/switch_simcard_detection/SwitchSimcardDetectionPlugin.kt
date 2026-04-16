@@ -228,10 +228,10 @@ class SwitchSimcardDetectionPlugin: FlutterPlugin, MethodCallHandler {
       }
       
       // Check permissions
-      if (!PermissionHelper.hasRequiredPermissions(context)) {
+      if (!PermissionHelper.canSwitchSIM(context)) {
         result.error(
           "PERMISSION_DENIED",
-          "Missing required permissions for network monitoring",
+          "Missing required permissions for automatic SIM switching",
           null
         )
         return
@@ -239,37 +239,38 @@ class SwitchSimcardDetectionPlugin: FlutterPlugin, MethodCallHandler {
       
       Log.i(TAG, "Enabling auto-switch: Primary=SIM${primarySIM + 1}, Fallback=SIM${fallbackSIM + 1}")
       
-      // Create network monitor if not exists
-      if (networkMonitor == null) {
-        networkMonitor = NetworkMonitor(
-          context,
-          onNetworkLost = { lostSIM ->
-            Log.w(TAG, "Network lost on SIM${lostSIM + 1}, switching to fallback")
-            
-            val targetSIM = if (lostSIM == primarySIM) fallbackSIM else primarySIM
-            val success = simSwitcher?.smartSwitch(targetSIM) ?: false
-            
-            if (success) {
-              eventSink?.success(mapOf(
-                "event" to "autoSwitched",
-                "fromSIM" to lostSIM,
-                "toSIM" to targetSIM,
-                "reason" to "networkLost",
-                "timestamp" to System.currentTimeMillis()
-              ))
-            }
-          },
-          onNetworkRestored = { restoredSIM ->
-            Log.i(TAG, "Network restored on SIM${restoredSIM + 1}")
-            
+      // Always recreate the monitor here. `getNetworkQuality()` / `getNetworkInfo()`
+      // may have created a read-only monitor with empty callbacks, and reusing that
+      // instance would make auto-switch appear enabled while never switching.
+      networkMonitor?.stopMonitoring()
+      networkMonitor = NetworkMonitor(
+        context,
+        onNetworkLost = { lostSIM ->
+          Log.w(TAG, "No internet on SIM${lostSIM + 1}, switching to the other SIM")
+
+          val targetSIM = if (lostSIM == primarySIM) fallbackSIM else primarySIM
+          val success = simSwitcher?.smartSwitch(targetSIM) ?: false
+
+          if (success) {
             eventSink?.success(mapOf(
-              "event" to "networkRestored",
-              "simIndex" to restoredSIM,
+              "event" to "autoSwitched",
+              "fromSIM" to lostSIM,
+              "toSIM" to targetSIM,
+              "reason" to "noInternet",
               "timestamp" to System.currentTimeMillis()
             ))
           }
-        )
-      }
+        },
+        onNetworkRestored = { restoredSIM ->
+          Log.i(TAG, "Network restored on SIM${restoredSIM + 1}")
+
+          eventSink?.success(mapOf(
+            "event" to "networkRestored",
+            "simIndex" to restoredSIM,
+            "timestamp" to System.currentTimeMillis()
+          ))
+        }
+      )
       
       // Start monitoring
       networkMonitor?.startMonitoring(primarySIM, fallbackSIM)
@@ -290,6 +291,7 @@ class SwitchSimcardDetectionPlugin: FlutterPlugin, MethodCallHandler {
       Log.i(TAG, "Disabling auto-switch")
       
       networkMonitor?.stopMonitoring()
+      networkMonitor = null
       
       result.success(true)
       

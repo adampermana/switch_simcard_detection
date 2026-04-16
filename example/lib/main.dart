@@ -69,7 +69,11 @@ class _MyAppState extends State<MyApp> {
       } else if (event.event == 'autoSwitched') {
         _addLog(
             '   Auto-switched from SIM ${(event.fromSIM ?? 0) + 1} to SIM ${(event.toSIM ?? 0) + 1}');
-        _addLog('   Reason: ${event.reason}');
+        if (event.reason == 'noInternet') {
+          _addLog('   Reason: Active SIM has no usable internet');
+        } else {
+          _addLog('   Reason: ${event.reason}');
+        }
       } else if (event.event == 'networkRestored') {
         _addLog('   Network restored on SIM ${(event.simIndex ?? 0) + 1}');
       }
@@ -235,7 +239,7 @@ class _MyAppState extends State<MyApp> {
         setState(() => _autoSwitchEnabled = false);
         _addLog('✓ Auto-switch disabled');
       } else {
-        _addLog('Enabling auto-switch (Primary: SIM1, Fallback: SIM2)...');
+        _addLog('Enabling bidirectional auto-switch between SIM1 and SIM2...');
         await _plugin.enableAutoSwitch(primarySIM: 0, fallbackSIM: 1);
         setState(() => _autoSwitchEnabled = true);
         _addLog('✓ Auto-switch enabled');
@@ -388,7 +392,7 @@ class _MyAppState extends State<MyApp> {
                 SwitchListTile(
                   title: const Text('Enable Auto-Switch'),
                   subtitle: Text(_autoSwitchEnabled
-                      ? 'Primary: SIM1, Fallback: SIM2'
+                      ? 'Monitors active SIM and switches to the other SIM when internet fails'
                       : 'Disabled'),
                   value: _autoSwitchEnabled,
                   onChanged: _canSwitch ? (_) => _toggleAutoSwitch() : null,
@@ -397,7 +401,7 @@ class _MyAppState extends State<MyApp> {
                   const Padding(
                     padding: EdgeInsets.all(8.0),
                     child: Text(
-                      'Plugin will automatically switch to SIM2 if SIM1 loses network.',
+                      'Plugin monitors whichever data SIM is active. If that SIM cannot access internet, it switches to the other SIM and continues monitoring there.',
                       style:
                           TextStyle(fontSize: 12, fontStyle: FontStyle.italic),
                     ),

@@ -7,7 +7,9 @@
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.MODIFY_PHONE_STATE" />
 
     <!-- Special permission for SIM switching - must be granted via ADB -->
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"
