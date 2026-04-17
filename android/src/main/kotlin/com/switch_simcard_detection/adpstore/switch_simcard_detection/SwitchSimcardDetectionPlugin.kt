@@ -246,29 +246,39 @@ class SwitchSimcardDetectionPlugin: FlutterPlugin, MethodCallHandler {
       networkMonitor = NetworkMonitor(
         context,
         onNetworkLost = { lostSIM ->
-          Log.w(TAG, "No internet on SIM${lostSIM + 1}, switching to the other SIM")
+          try {
+            Log.w(TAG, "No internet on SIM${lostSIM + 1}, switching to the other SIM")
 
-          val targetSIM = if (lostSIM == primarySIM) fallbackSIM else primarySIM
-          val success = simSwitcher?.smartSwitch(targetSIM) ?: false
+            val targetSIM = if (lostSIM == primarySIM) fallbackSIM else primarySIM
+            val success = simSwitcher?.smartSwitch(targetSIM) ?: false
 
-          if (success) {
-            eventSink?.success(mapOf(
-              "event" to "autoSwitched",
-              "fromSIM" to lostSIM,
-              "toSIM" to targetSIM,
-              "reason" to "noInternet",
-              "timestamp" to System.currentTimeMillis()
-            ))
+            if (success) {
+              eventSink?.success(mapOf(
+                "event" to "autoSwitched",
+                "fromSIM" to lostSIM,
+                "toSIM" to targetSIM,
+                "reason" to "noInternet",
+                "timestamp" to System.currentTimeMillis()
+              ))
+            }
+          } catch (e: Exception) {
+            // Jangan lempar exception — mencegah background service crash
+            // ketika terjadi conflict dengan system SIM switch atau permission error
+            Log.e(TAG, "Error in auto-switch callback (service protected): ${e.message}")
           }
         },
         onNetworkRestored = { restoredSIM ->
-          Log.i(TAG, "Network restored on SIM${restoredSIM + 1}")
+          try {
+            Log.i(TAG, "Network restored on SIM${restoredSIM + 1}")
 
-          eventSink?.success(mapOf(
-            "event" to "networkRestored",
-            "simIndex" to restoredSIM,
-            "timestamp" to System.currentTimeMillis()
-          ))
+            eventSink?.success(mapOf(
+              "event" to "networkRestored",
+              "simIndex" to restoredSIM,
+              "timestamp" to System.currentTimeMillis()
+            ))
+          } catch (e: Exception) {
+            Log.e(TAG, "Error in onNetworkRestored callback: ${e.message}")
+          }
         }
       )
       

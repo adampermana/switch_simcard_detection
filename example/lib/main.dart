@@ -15,6 +15,14 @@ import 'package:switch_simcard_detection/switch_simcard_detection.dart';
 void onStart(ServiceInstance service) async {
   DartPluginRegistrant.ensureInitialized();
 
+  if (service is AndroidServiceInstance) {
+    service.setAsForegroundService();
+    service.setForegroundNotificationInfo(
+      title: 'SIM Monitor',
+      content: 'Monitoring SIM network for auto-switching...',
+    );
+  }
+
   final plugin = SwitchSimcardDetection();
 
   try {
@@ -53,6 +61,14 @@ void onStart(ServiceInstance service) async {
     try {
       final sim = await plugin.getCurrentDataSIM();
       final quality = await plugin.getNetworkQuality();
+
+      if (service is AndroidServiceInstance) {
+        service.setForegroundNotificationInfo(
+          title: 'SIM Monitor',
+          content: 'Current SIM: ${sim + 1} | Quality: $quality',
+        );
+      }
+
       service.invoke('heartbeat', {'currentSIM': sim, 'quality': quality});
     } catch (_) {}
   });

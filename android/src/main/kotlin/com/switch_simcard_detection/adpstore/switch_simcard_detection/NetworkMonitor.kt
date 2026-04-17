@@ -1,6 +1,9 @@
 package com.switch_simcard_detection.adpstore.switch_simcard_detection
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -8,6 +11,7 @@ import android.net.NetworkRequest
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.annotation.RequiresApi
@@ -28,16 +32,19 @@ class NetworkMonitor(
     
     companion object {
         private const val TAG = "NetworkMonitor"
-        private const val CHECK_INTERVAL_MS = 5000L
-        // Reduced: 2 consecutive failures = ~10s before triggering switch (was 3 = ~15s)
+        // Polling setiap 3 detik — lebih responsif dari 5 detik
+        private const val CHECK_INTERVAL_MS = 3000L
+        // 2 kegagalan berurutan (~6 detik) sebelum trigger switch.
+        // Aman karena subscriptionChangedReceiver reset counter saat user manual switch SIM.
         private const val NETWORK_LOSS_THRESHOLD = 2
-        private const val PING_TIMEOUT_MS = 3000
+        // Timeout 2 detik untuk ping & HTTP (lebih cepat dari 3 detik)
+        private const val PING_TIMEOUT_MS = 2000
         private const val PING_HOST = "google.com"
         private const val HTTP_CHECK_URL = "https://www.google.com/generate_204"
-        // Cooldown between switches: 8s (was 10s). Prevents thrash while still allowing recovery.
-        private const val SWITCH_COOLDOWN_MS = 8000L
-        // If both SIMs recently failed, pause before probing again to avoid switch ping-pong.
-        private const val BOTH_SIMS_RETRY_DELAY_MS = 20000L
+        // Cooldown 5 detik antar switch (cukup untuk mencegah ping-pong)
+        private const val SWITCH_COOLDOWN_MS = 5000L
+        // Jika kedua SIM baru saja gagal, tunggu 10 detik sebelum coba lagi
+        private const val BOTH_SIMS_RETRY_DELAY_MS = 10000L
     }
 
     private var isMonitoring = false
@@ -59,6 +66,8 @@ class NetworkMonitor(
     private var dualSimRetryBlockedUntil = 0L
     private val recentFailureTimes = mutableMapOf<Int, Long>()
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var airplaneModeReceiver: BroadcastReceiver? = null
+    private var subscriptionChangedReceiver: BroadcastReceiver? = null
     
     /**
      * Start monitoring network
@@ -80,6 +89,8 @@ class NetworkMonitor(
         
         Log.i(TAG, "Started monitoring - Primary: SIM${primarySIM + 1}, Fallback: SIM${fallbackSIM + 1}")
         
+        registerSubscriptionChangedReceiver()
+        registerAirplaneModeReceiver()
         registerNetworkCallback()
         scheduleNextCheck()
     }
@@ -88,6 +99,8 @@ class NetworkMonitor(
         isMonitoring = false
         handler.removeCallbacksAndMessages(null)
         unregisterNetworkCallback()
+        unregisterAirplaneModeReceiver()
+        unregisterSubscriptionChangedReceiver()
         Log.i(TAG, "Stopped monitoring")
     }
     
@@ -131,8 +144,134 @@ class NetworkMonitor(
             networkCallback = null
         }
     }
-    
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Airplane mode receiver
+    // Ketika airplane mode di-OFF-kan, Android mungkin tidak secara otomatis
+    // me-restore NetworkCallback yang lama. Receiver ini memastikan callback
+    // di-re-register sehingga deteksi koneksi kembali berjalan normal.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private fun registerAirplaneModeReceiver() {
+        if (airplaneModeReceiver != null) return
+
+        airplaneModeReceiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context, intent: Intent) {
+                if (intent.action != Intent.ACTION_AIRPLANE_MODE_CHANGED) return
+                val isAirplaneOn = intent.getBooleanExtra("state", false)
+
+                if (isAirplaneOn) {
+                    // ✈️ Airplane mode ON
+                    Log.i(TAG, "✈️ Airplane mode ON — pausing switch logic, unregistering callback")
+                    networkLossCount = 0
+                    dualSimRetryBlockedUntil = 0L
+                    recentFailureTimes.clear()
+                    // Unregister callback to avoid spurious onLost events
+                    unregisterNetworkCallback()
+                } else {
+                    // ✈️ Airplane mode OFF — re-register callback and check immediately
+                    Log.i(TAG, "✈️ Airplane mode OFF — resuming monitoring")
+                    networkLossCount = 0
+                    dualSimRetryBlockedUntil = 0L
+                    recentFailureTimes.clear()
+                    lastKnownGoodSIM = -1 // akan di-update saat onAvailable()
+                    registerNetworkCallback()
+                    // Delay 4s: cukup untuk data seluler aktif kembali
+                    // setelah airplane mode dimatikan.
+                    handler.postDelayed({
+                        if (isMonitoring) performNetworkCheck()
+                    }, 4000L)
+                }
+            }
+        }
+
+        try {
+            val filter = IntentFilter(Intent.ACTION_AIRPLANE_MODE_CHANGED)
+            context.registerReceiver(airplaneModeReceiver, filter)
+            Log.d(TAG, "Airplane mode receiver registered")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to register airplane mode receiver", e)
+            airplaneModeReceiver = null
+        }
+    }
+
+    private fun unregisterAirplaneModeReceiver() {
+        try {
+            airplaneModeReceiver?.let { context.unregisterReceiver(it) }
+        } catch (e: Exception) {
+            Log.d(TAG, "Airplane mode receiver already unregistered")
+        } finally {
+            airplaneModeReceiver = null
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Subscription changed receiver
+    // Mendeteksi ketika user manual ganti default data SIM via Android Settings.
+    // Tanpa ini, monitor akan deteksi SIM lama "lost" dan coba BALIK ke SIM lama →
+    // konflik/exception → background service crash → notifikasi hilang.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private fun registerSubscriptionChangedReceiver() {
+        if (subscriptionChangedReceiver != null) return
+
+        subscriptionChangedReceiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context, intent: Intent) {
+                if (intent.action != "android.telephony.action.DEFAULT_DATA_SUBSCRIPTION_CHANGED") return
+
+                val newDataSIM = simSwitcher.getCurrentDataSIMSlot()
+                Log.i(TAG, "📱 System changed default data SIM to SIM${newDataSIM + 1}")
+
+                // Reset semua counter agar tidak terjadi false switch
+                networkLossCount = 0
+                dualSimRetryBlockedUntil = 0L
+                recentFailureTimes.clear()
+
+                // Terapkan cooldown agar monitor tidak langsung switch lagi
+                lastSwitchTime = System.currentTimeMillis()
+                lastKnownGoodSIM = newDataSIM
+
+                // Update primary/fallback mengikuti pilihan user:
+                // SIM yang dipilih user menjadi primary, SIM lainnya menjadi fallback
+                if (newDataSIM in 0..1) {
+                    primarySIM = newDataSIM
+                    fallbackSIM = if (newDataSIM == 0) 1 else 0
+                    Log.i(TAG, "  Updated monitoring: primary=SIM${primarySIM + 1}, fallback=SIM${fallbackSIM + 1}")
+                }
+
+                // Re-register callback karena perubahan subscription bisa invalidate yang lama
+                registerNetworkCallback()
+            }
+        }
+
+        try {
+            val filter = IntentFilter("android.telephony.action.DEFAULT_DATA_SUBSCRIPTION_CHANGED")
+            context.registerReceiver(subscriptionChangedReceiver, filter)
+            Log.d(TAG, "Subscription changed receiver registered")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to register subscription changed receiver", e)
+            subscriptionChangedReceiver = null
+        }
+    }
+
+    private fun unregisterSubscriptionChangedReceiver() {
+        try {
+            subscriptionChangedReceiver?.let { context.unregisterReceiver(it) }
+        } catch (e: Exception) {
+            Log.d(TAG, "Subscription changed receiver already unregistered")
+        } finally {
+            subscriptionChangedReceiver = null
+        }
+    }
+
+
     private fun handleNetworkAvailable() {
+        if (isAirplaneModeOn()) {
+            Log.d(TAG, "Ignoring network available callback while airplane mode is ON")
+            networkLossCount = 0
+            return
+        }
+
         networkLossCount = 0
         
         val currentSlot = simSwitcher.getCurrentDataSIMSlot()
@@ -148,6 +287,12 @@ class NetworkMonitor(
     }
     
     private fun handleNetworkLost() {
+        if (isAirplaneModeOn()) {
+            Log.i(TAG, "Airplane mode is ON, skipping network-loss handling")
+            networkLossCount = 0
+            return
+        }
+
         networkLossCount++
         
         val currentSlot = simSwitcher.getCurrentDataSIMSlot()
@@ -170,6 +315,12 @@ class NetworkMonitor(
      * and then immediately revert.
      */
     private fun performSwitch() {
+        if (isAirplaneModeOn()) {
+            Log.i(TAG, "Airplane mode is ON, skipping SIM auto-switch")
+            networkLossCount = 0
+            return
+        }
+
         val now = System.currentTimeMillis()
         if (now - lastSwitchTime < SWITCH_COOLDOWN_MS) {
             Log.d(TAG, "Switch cooldown active, skipping")
@@ -206,8 +357,14 @@ class NetworkMonitor(
         lastSwitchTime = now
         networkLossCount = 0
 
-        // Notify: the plugin will call smartSwitch() once
-        onNetworkLost(lostSlot)
+        // Notify: the plugin will call smartSwitch() once.
+        // Wrapped in try-catch to prevent uncaught exception on main thread
+        // that would kill the background service.
+        try {
+            onNetworkLost(lostSlot)
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception in onNetworkLost callback — background service protected", e)
+        }
     }
     
     private fun scheduleNextCheck() {
@@ -230,6 +387,14 @@ class NetworkMonitor(
     private fun performNetworkCheck() {
         executor.execute {
             try {
+                if (isAirplaneModeOn()) {
+                    Log.d(TAG, "Skipping network check while airplane mode is ON")
+                    handler.post {
+                        networkLossCount = 0
+                    }
+                    return@execute
+                }
+
                 val quality = getNetworkQuality()
                 val pingResult = pingGoogle()
                 val httpResult = checkHttpConnectivity()
@@ -258,6 +423,19 @@ class NetworkMonitor(
             } catch (e: Exception) {
                 Log.e(TAG, "Error performing network check", e)
             }
+        }
+    }
+
+    private fun isAirplaneModeOn(): Boolean {
+        return try {
+            Settings.Global.getInt(
+                context.contentResolver,
+                Settings.Global.AIRPLANE_MODE_ON,
+                0
+            ) == 1
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to read airplane mode state", e)
+            false
         }
     }
     
